@@ -1,164 +1,140 @@
 #!/usr/bin/env python3
 
+import json
 import pathlib
 import curses
-from model import *
+import math
+import random
+from map_utils import *
 
-# Refined border definitions for collision detection
-BORDERS = ['═', '║', '╔', '╗', '╚', '╝', 'x', '-']
+# Constants
+PACMAN, BLINKY, PINKY, INKY, CLYDE = "pacman", "blinky", "pinky", "inky", "clyde"
+SYMBOL, CHERRY, POINTS, EYES = "symbol", "cherry", "points", '👀'
+STANDING_START_ANNOUNCEMENT = "standing_start_announcement"
+PACMAN_SYMBOL, READY, EXPLODING, SKULL = "ᗧ", "READY!", '💥', '💀'
+X, Y = "x", "y"
 
-class PacmanGameEngine:
-    """The class handles game flow and state transitions."""
-    
-    def __init__(self):
-        pass
+# Colors (RGB 0-255)
+COLOR_RGB_PACMAN = (255, 255, 0)
+COLOR_RGB_BLINKY = (255, 0, 0)
+COLOR_RGB_PINKY = (255, 184, 255)
+COLOR_RGB_INKY = (0, 255, 255)
+COLOR_RGB_CLYDE = (255, 184, 82)
+
+NOT_WALKABLE = ['═', '║', '╔', '╗', '╚', '╝', '-', 'x']
+
+class Object:
+    def __init__(self, x, y, symbol, color):
+        if not isinstance(x, int) or not isinstance(y, int):
+            raise TypeError("Coordinates must be integers.")
+        self._x, self._y = x, y
+        self.__symbol = symbol
+        self.__color = color
+
+    @property
+    def x(self): return self._x
+    @property
+    def y(self): return self._y
+    @property
+    def symbol(self): return self.__symbol
+    @property
+    def color(self): return self.__color
+
+class AnimatedCharacter(Object):
+    def set_direction(self, dy, dx, pmap):
+        new_x, new_y = self._x + dx, self._y + dy
+        
+        # Tunneling logic
+        if dx == -1 and self._x == 0:
+            new_x = pmap.width - 1
+        elif dx == 1 and self._x == pmap.width - 1:
+            new_x = 0
+            
+        if pmap.grid[new_y][new_x] not in NOT_WALKABLE:
+            self._x, self._y = new_x, new_y
+
+class Ghost(AnimatedCharacter):
+    def __init__(self, x, y, color):
+        super().__init__(x, y, 'ᗣ', color)
+        self.last_pos = (x, y)
+
+    def play(self, scene, level):
+        moves = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+        random.shuffle(moves)
+        for dy, dx in moves:
+            nx, ny = self._x + dx, self._y + dy
+            if 0 <= ny < level.pmap.height and 0 <= nx < level.pmap.width:
+                if level.pmap.grid[ny][nx] not in NOT_WALKABLE:
+                    if (nx, ny) != self.last_pos:
+                        self.last_pos = (self._x, self._y)
+                        self._x, self._y = nx, ny
+                        break
+
+class Pacman(AnimatedCharacter):
+    def __init__(self, x, y, symbol, color):
+        super().__init__(x, y, symbol, color)
+
+class Map:
+    def __init__(self, data):
+        self.grid = [list(line) for line in data]
+        self.height = len(data)
+        self.width = max(len(line) for line in data) if data else 0
 
     @staticmethod
-    def __set_up(level_number):
-        # Validate input
-        if not isinstance(level_number, int):
-            raise TypeError("'level_number' must be an integer")
-        if level_number < 0:
-            raise ValueError("'level_number' must be a positive integer")
+    def load_map(path):
+        return Map(prettify_map(uncompress_map_with_rle(load_map(path))))
+
+class Level:
+    def __init__(self, number, pmap, objects):
+        self.number = number
+        self.pmap = pmap
+        self.pacman = objects[0]
+        self.ghosts = objects[1:5]
+        self.bonus = objects[5]
+        self.start_info = objects[6]
+
+    @classmethod
+    def load(cls, number, root="./"):
+        path = pathlib.Path(root) / "map" / f"level{number}"
+        with open(f"{path}.json", "r") as f:
+            data = json.load(f)
         
-        # Initialize curses
-        window = curses.initscr()
-        curses.start_color()
-        curses.noecho()
-        curses.cbreak()
-        curses.curs_set(0)
+        objs = [
+            Pacman(data[PACMAN][X], data[PACMAN][Y], PACMAN_SYMBOL, COLOR_RGB_PACMAN),
+            Ghost(data[PINKY][X], data[PINKY][Y], COLOR_RGB_PINKY),
+            Ghost(data[INKY][X], data[INKY][Y], COLOR_RGB_INKY),
+            Ghost(data[BLINKY][X], data[BLINKY][Y], COLOR_RGB_BLINKY),
+            Ghost(data[CLYDE][X], data[CLYDE][Y], COLOR_RGB_CLYDE),
+            Object(data[CHERRY][0][X], data[CHERRY][0][Y], data[CHERRY][0][SYMBOL], (255, 0, 0)),
+            Object(data[STANDING_START_ANNOUNCEMENT][X], data[STANDING_START_ANNOUNCEMENT][Y], "", (0,0,0))
+        ]
+        return cls(number, Map.load_map(f"{path}.rle"), objs)
+
+class Scene:
+    def __init__(self, window, level, palette):
+        self.window = window
+        self.level = level
+        self.palette = palette
+        self.points = 0
+        self.life = 3
+
+    def render(self):
+        self.window.erase()
+        h, w = self.window.getmaxyx()
+        ry, rx = (h // 2) - (self.level.pmap.height // 2), (w // 2) - (self.level.pmap.width // 2)
+
+        # Draw Map
+        for y, line in enumerate(self.level.pmap.grid):
+            for x, char in enumerate(line):
+                color = self.palette.get_composite_color((25, 25, 255)) if char in BORDERS else self.palette.get_composite_color((255, 255, 255))
+                self.window.addch(y + ry, x + rx, char, color)
+
+        # Draw Entities
+        p = self.level.pacman
+        self.window.addch(p.y + ry, p.x + rx, p.symbol, self.palette.get_composite_color(p.color))
         
-        window.nodelay(1)
-        window.keypad(1)
-        
-        # Load game data
-        level = Level.load(level_number)
-        scene = Scene(window, level)
-        
-        return window, level, scene
+        for g in self.level.ghosts:
+            self.window.addch(g.y + ry, g.x + rx, g.symbol, self.palette.get_composite_color(g.color))
 
-    @staticmethod
-    def _tear_down(window):
-        # Restore terminal settings safely
-        window.clear()
-        window.refresh()
-        curses.nocbreak()
-        window.keypad(False)
-        curses.echo()
-        curses.curs_set(1)
-        curses.endwin()
-
-    def __handle_input(self, window, pacman, pmap):
-        """Captures input and validates potential direction changes."""
-        button = window.getch()
-        
-        if button == ord('q'):
-            return "QUIT"
-            
-        # Check for potential moves (Input Validation)
-        new_dir = None
-        if button in [ord('w'), curses.KEY_UP]:
-            new_dir = (-1, 0)
-        elif button in [ord('s'), curses.KEY_DOWN]:
-            new_dir = (1, 0)
-        elif button in [ord('a'), curses.KEY_LEFT]:
-            new_dir = (0, -1)
-        elif button in [ord('d'), curses.KEY_RIGHT]:
-            new_dir = (0, 1)
-
-        # Only update direction if there's no wall in that direction
-        if new_dir:
-            target_y, target_x = pacman.y + new_dir[0], pacman.x + new_dir[1]
-            if 0 <= target_y < pmap.height and 0 <= target_x < pmap.width:
-                if pmap.grid[target_y][target_x] not in BORDERS:
-                    pacman.set_direction(new_dir[0], new_dir[1])
-        
-        return "CONTINUE"
-
-    def __run(self, window, level, scene):
-        pacman = level.pacman
-        pmap = level.pmap
-        ghosts = level.ghosts
-        bonuses = level.bonuses
-        
-        main_loop = 0
-        power_timer = 0
-        eaten_ghost_multiplier = 0
-
-        # Standing Start Announcement (Ready!)
-        for _ in range(15):
-            scene.standing_start_announcement = True
-            scene.render()
-            curses.napms(100)
-        scene.standing_start_announcement = False
-
-        while True:
-            main_loop += 1
-            
-            # 1. Input Handling
-            if self.__handle_input(window, pacman, pmap) == "QUIT":
-                break
-
-            # 2. Movement & Physics
-            # Check if current direction hits a wall
-            next_y, next_x = pacman.y + pacman.dir_y, pacman.x + pacman.dir_x
-            if pmap.grid[next_y][next_x] in BORDERS:
-                pacman.set_direction(0, 0) # Stop at wall
-            
-            pacman.play(scene) # Move Pac-Man
-
-            # 3. Collision Logic (Items)
-            current_tile = pmap.grid[pacman.y][pacman.x]
-            if current_tile == '·':
-                pmap.grid[pacman.y][pacman.x] = ' '
-                scene.points += 10
-            elif current_tile == '•':
-                pmap.grid[pacman.y][pacman.x] = ' '
-                scene.points += 50
-                scene.power_capsule = True
-                power_timer = 40 # Power mode duration
-                eaten_ghost_multiplier = 0
-
-            # 4. Ghost AI & Interaction
-            for ghost in ghosts:
-                # Handle movement (Exit cage first, then chase)
-                if main_loop > 10:
-                    ghost.play(scene, level)
-                
-                # Check collision with Pac-Man
-                if pacman.x == ghost.x and pacman.y == ghost.y:
-                    if scene.power_capsule and not ghost.is_eaten:
-                        # Pac-man eats ghost
-                        ghost.is_eaten = True
-                        eaten_ghost_multiplier += 1
-                        scene.points += (200 * eaten_ghost_multiplier)
-                    elif not scene.power_capsule:
-                        # Ghost eats Pac-man
-                        scene.death = True
-
-            # 5. Handle Power Capsule Expiration
-            if scene.power_capsule:
-                power_timer -= 1
-                if power_timer < 10:
-                    scene.flash = True # Start flashing before ending
-                if power_timer <= 0:
-                    scene.power_capsule = False
-                    scene.flash = False
-                    for g in ghosts: g.is_eaten = False
-
-            # 6. Death Logic
-            if scene.death:
-                scene.render()
-                curses.napms(1500)
-                scene.life -= 1
-                if scene.life <= 0:
-                    break
-                # Reset positions
-                pacman.reset()
-                for g in ghosts: g.reset()
-                scene.death = False
-
-            # 7. Win Condition
-            if not any('·' in row or '•' in row for row in pmap.grid):
-                scene.render()
-                curses.napms(2000
+        self.window.addstr(0, 0, f" SCORE: {self.points} | LIVES: {self.life}", curses.A_BOLD)
+        self.window.refresh()
