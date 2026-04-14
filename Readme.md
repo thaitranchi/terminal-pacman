@@ -22,7 +22,7 @@ pacman
 ## 🛠️ Installation & Setup
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/thaitranchi/pacman.git
+   git clone https://github.com/thaitranchi/terminal-pacman.git
    cd pacman
    ```
 2. **Ensure Python 3.x is installed.**
